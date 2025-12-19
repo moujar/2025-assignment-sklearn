@@ -56,6 +56,7 @@ from sklearn.base import ClassifierMixin
 
 from sklearn.model_selection import BaseCrossValidator
 
+from sklearn.utils.multiclass import check_classification_targets
 from sklearn.utils.validation import check_is_fitted
 from sklearn.utils.validation import validate_data
 from sklearn.metrics.pairwise import pairwise_distances
@@ -83,9 +84,14 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
             The current instance of the classifier
         """
         X, y = validate_data(self, X, y)
-        self.X_train_ = X
-        self.y_train_ = y
+        check_classification_targets(y)
+        # checks if data is continuous or not
+        # this means if classes are weird (like -1s or floats or whatever)
+
+        self.X_ = X
+        self.y_ = y
         self.classes_ = np.unique(y)
+
         return self
 
     def predict(self, X):
@@ -102,34 +108,35 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
             Predicted class labels for each test data sample.
         """
         check_is_fitted(self)
-        X = validate_data(self, X, reset=False)
+        X = validate_data(self, X, reset=False)  # not sure if needed
 
-        # Compute distances between test and training samples
-        distances = pairwise_distances(X, self.X_train_, metric='euclidean')
-
-        # Get k nearest neighbors for each test sample
-        k = min(self.n_neighbors, self.X_train_.shape[0])
-        nearest_indices = np.argsort(distances, axis=1)[:, :k]
-
-        # Get labels of k nearest neighbors
-        nearest_labels = self.y_train_[nearest_indices]
-
-        # Predict majority class (or most frequent class)
-        # Handle ties by using the class that appears first in classes_
         y_pred = np.zeros(X.shape[0], dtype=self.classes_.dtype)
-        for i in range(X.shape[0]):
-            labels = nearest_labels[i]
-            # Count occurrences of each class
-            unique_labels, counts = np.unique(labels, return_counts=True)
-            # Get the class with maximum count
-            # In case of tie, use the first one in classes_ order
-            max_count = counts.max()
-            candidates = unique_labels[counts == max_count]
-            # Choose the candidate that appears first in classes_
-            class_indices = [
-                np.where(self.classes_ == c)[0][0]
-                for c in candidates]
-            y_pred[i] = candidates[np.argmin(class_indices)]
+        distances = pairwise_distances(X, self.X_)  # reminder, X_ is TRAINING
+
+        if self.n_neighbors == 1:
+            # for each x test (axis=1), get the MINIMUM distance index
+            # change result from ([indexes],) to ([indexes],1) (for example),
+            # basically, it needs to match the SIZE that the
+            # rest of the code is expecting.
+            neighbor_indices = np.argmin(distances, axis=1)[:, np.newaxis]
+        else:
+            # argpartition -> orders around the
+            # kth element (smaller first, larger after)
+            # and then continue as above.
+            neighbor_indices = np.argpartition(
+                distances,
+                self.n_neighbors,
+                axis=1)[:, :self.n_neighbors]
+        # look at the matches. eg. look at ur
+        # closest X's classes. take majority
+
+        neighbor_labels = self.y_[neighbor_indices]
+
+        for sample_idx in range(X.shape[0]):  # goes through all x tests
+            unique_classes, class_counts = np.unique(
+                neighbor_labels[sample_idx],
+                return_counts=True)
+            y_pred[sample_idx] = unique_classes[np.argmax(class_counts)]
 
         return y_pred
 
@@ -148,8 +155,9 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
         score : float
             Accuracy of the model computed for the (X, y) pairs.
         """
-        check_is_fitted(self)
+        # score means accuracy -> average
         y_pred = self.predict(X)
+
         return np.mean(y_pred == y)
 
 
@@ -190,38 +198,31 @@ class MonthlySplit(BaseCrossValidator):
         n_splits : int
             The number of splits.
         """
-        # Get datetime column or index
-        if self.time_col == 'index':
-            if isinstance(X, pd.DataFrame):
-                time_series = X.index
-            elif isinstance(X, pd.Series):
-                time_series = X.index
-            else:
-                raise ValueError(
-                    "When time_col='index', X must be a "
-                    "DataFrame or Series with datetime index")
+        if self.time_col == "index":  # check if time_col is set to index
+            if not hasattr(X, "index"):  # throw an error if not
+                raise ValueError("X must have a datetime index")
+            # set datetime_values to the datetimes in index
+            datetime_values = X.index
         else:
-            if not isinstance(X, pd.DataFrame):
+            if not isinstance(X, pd.DataFrame):  # is it a df?
                 raise ValueError(
-                    "When time_col is not 'index', X must be "
-                    "a DataFrame")
-            if self.time_col not in X.columns:
-                raise ValueError(f"Column '{self.time_col}' not found in X")
-            time_series = X[self.time_col]
+                    "X must be a DataFrame with a datetime column"
+                )
+            # if a df and index wasn't our time_col,
+            # use whatever our time_col is
+            datetime_values = X[self.time_col]
 
-        # Check if datetime
-        if not pd.api.types.is_datetime64_any_dtype(time_series):
-            raise ValueError("time_col must be of datetime type")
+        # ensure all datetime_values are actually datetimes
+        datetime_values = pd.to_datetime(datetime_values, errors="raise")
+        if isinstance(datetime_values, pd.Series):
+            # sort them !
+            month_periods = datetime_values.dt.to_period('M').sort_values()
+        else:
+            # sort them !
+            month_periods = datetime_values.to_period('M').sort_values()
 
-        # Get unique year-month pairs
-        time_df = pd.DataFrame({'time': time_series})
-        time_df['year_month'] = time_df['time'].dt.to_period('M')
-        unique_months = time_df['year_month'].unique()
-        unique_months = sorted(unique_months)
-
-        # Number of splits is number of consecutive month pairs
-        n_splits = len(unique_months) - 1
-        return max(0, n_splits)
+        # if only one month, then 0 splits, otherwise its total - 1 splits
+        return max(0, month_periods.nunique() - 1)
 
     def split(self, X, y, groups=None):
         """Generate indices to split data into training and test set.
@@ -243,53 +244,43 @@ class MonthlySplit(BaseCrossValidator):
         idx_test : ndarray
             The testing set indices for that split.
         """
-        # Get datetime column or index
-        if self.time_col == 'index':
-            if isinstance(X, pd.DataFrame):
-                time_series = X.index
-            elif isinstance(X, pd.Series):
-                time_series = X.index
-            else:
-                raise ValueError(
-                    "When time_col='index', X must be a "
-                    "DataFrame or Series with datetime index")
+        if self.time_col == "index":
+            if not hasattr(X, "index"):
+                raise ValueError("X must have a datetime index")
+            datetime_values = X.index
         else:
             if not isinstance(X, pd.DataFrame):
                 raise ValueError(
-                    "When time_col is not 'index', X must be "
-                    "a DataFrame")
-            if self.time_col not in X.columns:
-                raise ValueError(f"Column '{self.time_col}' not found in X")
-            time_series = X[self.time_col]
+                    "X must be a DataFrame with a datetime column")
+            datetime_values = X[self.time_col]
+        if not pd.api.types.is_datetime64_any_dtype(datetime_values):
+            raise ValueError("Not a datetime")
 
-        # Check if datetime
-        if not pd.api.types.is_datetime64_any_dtype(time_series):
-            raise ValueError("time_col must be of datetime type")
+        datetime_values = pd.to_datetime(datetime_values, errors="raise")
+        if isinstance(datetime_values, pd.Series):
+            month_periods = datetime_values.dt.to_period("M")
+        else:
+            month_periods = datetime_values.to_period("M")
 
-        # Create DataFrame with time and original indices
-        time_df = pd.DataFrame({
-            'time': time_series,
-            'original_idx': np.arange(len(time_series))
-        })
-        time_df['year_month'] = time_df['time'].dt.to_period('M')
+        # figure out the sort order
+        sort_indices = np.argsort(datetime_values.values)
+        sorted_month_periods = month_periods[sort_indices]  # sort the months
+        sorted_indices = np.asarray(sort_indices)  # get the indexes
 
-        # Get unique year-month pairs sorted
-        unique_months = sorted(time_df['year_month'].unique())
+        # get the unique months
+        unique_month_periods = sorted_month_periods.unique()
+        n_splits = self.get_n_splits(X, y, groups)  # get the number of splits
 
-        # Generate splits for consecutive month pairs
-        for i in range(len(unique_months) - 1):
-            train_month = unique_months[i]
-            test_month = unique_months[i + 1]
+        # each month will be a test month
+        for split_idx in range(n_splits):
+            train_month = unique_month_periods[split_idx]
+            test_month = unique_month_periods[split_idx + 1]
 
-            # Get indices for train and test months
-            train_mask = time_df['year_month'] == train_month
-            test_mask = time_df['year_month'] == test_month
+            # train on the month before test month
+            train_month_mask = sorted_month_periods == train_month
+            # test on the next month
+            test_month_mask = sorted_month_periods == test_month
+            idx_train = sorted_indices[train_month_mask]
+            idx_test = sorted_indices[test_month_mask]
 
-            idx_train = time_df[train_mask]['original_idx'].values
-            idx_test = time_df[test_mask]['original_idx'].values
-
-            # Convert to integer array
-            idx_train = idx_train.astype(int)
-            idx_test = idx_test.astype(int)
-
-            yield (idx_train, idx_test)
+            yield idx_train, idx_test
