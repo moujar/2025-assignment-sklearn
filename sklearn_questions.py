@@ -126,8 +126,10 @@ class KNearestNeighbors(ClassifierMixin, BaseEstimator):
             max_count = counts.max()
             candidates = unique_labels[counts == max_count]
             # Choose the candidate that appears first in classes_
-            y_pred[i] = candidates[np.argmin([np.where(self.classes_ == c)[0][0]
-                                             for c in candidates])]
+            class_indices = [
+                np.where(self.classes_ == c)[0][0]
+                for c in candidates]
+            y_pred[i] = candidates[np.argmin(class_indices)]
 
         return y_pred
 
