@@ -264,8 +264,11 @@ class MonthlySplit(BaseCrossValidator):
 
         # figure out the sort order
         sort_indices = np.argsort(datetime_values.values)
-        sorted_month_periods = month_periods[sort_indices]  # sort the months
-        sorted_indices = np.asarray(sort_indices)  # get the indexes
+        # Use iloc for Series, direct indexing for Index
+        if isinstance(month_periods, pd.Series):
+            sorted_month_periods = month_periods.iloc[sort_indices]
+        else:
+            sorted_month_periods = month_periods[sort_indices]
 
         # get the unique months
         unique_month_periods = sorted_month_periods.unique()
@@ -280,7 +283,9 @@ class MonthlySplit(BaseCrossValidator):
             train_month_mask = sorted_month_periods == train_month
             # test on the next month
             test_month_mask = sorted_month_periods == test_month
-            idx_train = sorted_indices[train_month_mask]
-            idx_test = sorted_indices[test_month_mask]
+            # sort_indices[train_month_mask] gives original DataFrame
+            # positions where the month matches train_month
+            idx_train = sort_indices[train_month_mask]
+            idx_test = sort_indices[test_month_mask]
 
             yield idx_train, idx_test
